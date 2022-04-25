@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 '''
 Created on: 2022-04-25 09:58:28
-@LastEditTime: 2022-04-25 21:51:02
+@LastEditTime: 2022-04-25 21:52:52
 @Author: fduxuan
 
 @Desc:  
@@ -114,4 +114,4 @@ def f1_score(batch_data: dict) -> float:
                 recall = overlap / float((predict_end[i]-predict_start[i]))
                 f1 += float(2*precision*recall/(precision + recall))
     return f1
-    
+     
