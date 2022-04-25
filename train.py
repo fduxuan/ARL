@@ -1,16 +1,18 @@
 # -*- coding: utf-8 -*-
 '''
 Created on: 2022-04-25 15:12:29
-@LastEditTime: 2022-04-25 16:00:44
+@LastEditTime: 2022-04-25 21:25:47
 @Author: fduxuan
 
 @Desc:  训练
 
 '''
-from util import DataSet, logging
+from lib2to3.pgen2.tokenize import tokenize
+from util import DataSet, logging, f1_score
 from transformers import AutoTokenizer
 from tqdm import trange, tqdm
-
+from model import MRC
+import torch
 
 class TrainMrc:
     """ 训练MRC """
@@ -19,9 +21,14 @@ class TrainMrc:
         self.train_data = []
         self.dev_data = []
         self.model_id = 'bert-base-uncased'
+        # self.model_id = 'checkpoint'
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
         self.max_length = 384
         self.stride=157
+        self.batch_size = 1
+        self.epoch_num = 5
+        self.learning_rate=2e-5
+        
     
     @staticmethod    
     def info(msg):
@@ -78,7 +85,37 @@ class TrainMrc:
             # print(self.tokenizer.convert_ids_to_tokens(input_ids[answer[0]: answer[1]+1]))
             # print()
         return data_list
-            
+
+    def eval(self):
+        """ 进行验证
+        """
+        self.info('开始验证')
+        data = DataSet().load_dataset()
+        self.train_data = data['train']
+        self.dev_data = data['dev']
+        self.info('encode 测试集')
+        dev_encode_data = []
+        for item in tqdm(self.dev_data[:10]):
+            dev_encode_data += self.encode(item)
+        mrc = MRC('checkpoint')
+        f1 = 0.0
+        with torch.no_grad():
+            mrc.eval()
+            bar = trange(0, len(dev_encode_data), self.batch_size)
+            for i in bar:
+                end = min(i + self.batch_size, len(dev_encode_data))
+                batch_data = dict(
+                    input_ids=[x['input_ids'] for x in dev_encode_data[i: end]],
+                    token_type_ids=[x['token_type_ids'] for x in dev_encode_data[i: end]],
+                    attention_mask=[x['attention_mask'] for x in dev_encode_data[i: end]],
+                    answer_start=mrc.tensor([x['answer'][0] for x in dev_encode_data[i: end]]),
+                    answer_end=mrc.tensor([x['answer'][1] for x in dev_encode_data[i: end]]),
+                    answer_text=[x['answer_text'] for x in dev_encode_data[i: end]],
+                )
+                batch_data['start_logits'], batch_data['end_logits'] = mrc(batch_data)
+                f1 += f1_score(batch_data)
+                bar.set_postfix({'f1': f1/end})
+    
     def run(self):
         
         # 1. 加载数据集
@@ -92,8 +129,60 @@ class TrainMrc:
         train_encode_data = []
         for item in tqdm(self.train_data[:10]):
             train_encode_data += self.encode(item)
-
-
+        
+        # 3. 加载模型
+        self.info('3. 加载模型和优化器')
+        # mrc = MRC(self.model_id)
+        mrc = MRC('checkpoint')
+        optimizer = torch.optim.Adam(mrc.parameters(), lr=self.learning_rate)
+        loss_func = torch.nn.CrossEntropyLoss()
+        self.info(f'\t optimizer = Adam || loss_func = CrossEntropyLoss || learning_rate={self.learning_rate}')
+        
+        # 4. 转为batch格式训练
+        self.info(f'4. 开始训练 || batch_size = {self.batch_size}')
+        f = open('res.txt', 'w')
+        with torch.enable_grad():
+            mrc.train()
+            for epoch in range(0, self.epoch_num):
+                
+                loss_value = 0.0
+                bar = trange(0, len(train_encode_data), self.batch_size)
+                for i in bar:
+                    end = min(i + self.batch_size, len(train_encode_data))
+                    batch_data = dict(
+                        input_ids=[x['input_ids'] for x in train_encode_data[i: end]],
+                        token_type_ids=[x['token_type_ids'] for x in train_encode_data[i: end]],
+                        attention_mask=[x['attention_mask'] for x in train_encode_data[i: end]],
+                        answer_start=mrc.tensor([x['answer'][0] for x in train_encode_data[i: end]]),
+                        answer_end=mrc.tensor([x['answer'][1] for x in train_encode_data[i: end]]),
+                        answer_text=[x['answer_text'] for x in train_encode_data[i: end]],
+                    )
+                    optimizer.zero_grad()
+                    start_logits, end_logits = mrc(batch_data)
+                    
+                    loss = loss_func(start_logits, batch_data['answer_start']) + loss_func(end_logits, batch_data['answer_end'])
+                    loss.backward()
+                    optimizer.step()
+                    loss_value = loss.item()
+                    bar.set_postfix({'epoch': epoch+1, 'loss': loss_value})
+                    
+                    # 查看最大值
+                    _, predict_starts = torch.max(start_logits, dim=1) 
+                    _, predict_ends = torch.max(end_logits, dim=1)# 
+                    for j in range(0, len(predict_starts)):
+                        predict_answer = []
+                        input_ids = batch_data['input_ids'][j]
+                        answer_start = batch_data['answer_start']
+                        answer_end = batch_data['answer_end']
+                        
+                        if predict_ends[j] >= predict_starts[j]:
+                            predict_answer = self.tokenizer.convert_ids_to_tokens(input_ids[predict_starts[j]: predict_ends[j]+1])
+                        f.write(f"answer_text': {self.tokenizer.convert_ids_to_tokens(input_ids[answer_start[j]: answer_end[j]+1])}\n")
+                        f.write(f"real_answer_text': {batch_data['answer_text'][j]}\n")
+                        
+                        f.write(f"predict_answer_text': {predict_answer}\n")
+            mrc.save_model()         
+                                    
 if __name__ == "__main__":
     t = TrainMrc()
-    t.run()
+    t.eval()
