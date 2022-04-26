@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
 '''
 Created on: 2022-04-25 15:12:29
-@LastEditTime: 2022-04-25 21:25:47
+@LastEditTime: 2022-04-26 15:43:41
 @Author: fduxuan
 
 @Desc:  训练
 
 '''
-from lib2to3.pgen2.tokenize import tokenize
 from util import DataSet, logging, f1_score
 from transformers import AutoTokenizer
 from tqdm import trange, tqdm
@@ -25,8 +24,8 @@ class TrainMrc:
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
         self.max_length = 384
         self.stride=157
-        self.batch_size = 1
-        self.epoch_num = 5
+        self.batch_size = 16
+        self.epoch_num = 1
         self.learning_rate=2e-5
         
     
@@ -93,28 +92,41 @@ class TrainMrc:
         data = DataSet().load_dataset()
         self.train_data = data['train']
         self.dev_data = data['dev']
-        self.info('encode 测试集')
-        dev_encode_data = []
-        for item in tqdm(self.dev_data[:10]):
-            dev_encode_data += self.encode(item)
+        bar = tqdm(self.dev_data)
         mrc = MRC('checkpoint')
+        mrc.eval()
         f1 = 0.0
+        f1_no_answer = 0.0
+        f1_has_answer = 0.0
+        count = 0
+        count_has_answer = 0
+        count_no_answer = 0
+        
         with torch.no_grad():
-            mrc.eval()
-            bar = trange(0, len(dev_encode_data), self.batch_size)
-            for i in bar:
-                end = min(i + self.batch_size, len(dev_encode_data))
+            for item in bar:
+                # 每次只一个
+                dev_encode_data = self.encode(item)
                 batch_data = dict(
-                    input_ids=[x['input_ids'] for x in dev_encode_data[i: end]],
-                    token_type_ids=[x['token_type_ids'] for x in dev_encode_data[i: end]],
-                    attention_mask=[x['attention_mask'] for x in dev_encode_data[i: end]],
-                    answer_start=mrc.tensor([x['answer'][0] for x in dev_encode_data[i: end]]),
-                    answer_end=mrc.tensor([x['answer'][1] for x in dev_encode_data[i: end]]),
-                    answer_text=[x['answer_text'] for x in dev_encode_data[i: end]],
+                    input_ids=[x['input_ids'] for x in dev_encode_data],
+                    token_type_ids=[x['token_type_ids'] for x in dev_encode_data],
+                    attention_mask=[x['attention_mask'] for x in dev_encode_data],
+                    answer_start=mrc.tensor([x['answer'][0] for x in dev_encode_data]),
+                    answer_end=mrc.tensor([x['answer'][1] for x in dev_encode_data]),
+                    answer_text=[x['answer_text'] for x in dev_encode_data],
                 )
                 batch_data['start_logits'], batch_data['end_logits'] = mrc(batch_data)
-                f1 += f1_score(batch_data)
-                bar.set_postfix({'f1': f1/end})
+                _f1 = f1_score(batch_data, item['is_impossible'])
+                if item['is_impossible']:
+                    f1_no_answer += _f1
+                    count_no_answer += 1
+                else:
+                    f1_has_answer += _f1
+                    count_has_answer += 1
+                f1 += _f1
+                count += 1
+                if count and count_has_answer and count_no_answer:
+                    bar.set_postfix({'f1_total': f1/count, 'f1_has_answer': f1_has_answer/count_has_answer, 'f1_no_answer': f1_no_answer/count_no_answer})
+                
     
     def run(self):
         
@@ -127,7 +139,7 @@ class TrainMrc:
         # 2. encode，切片，并且手动padding
         self.info('2. encode训练集')
         train_encode_data = []
-        for item in tqdm(self.train_data[:10]):
+        for item in tqdm(self.train_data):
             train_encode_data += self.encode(item)
         
         # 3. 加载模型
@@ -185,4 +197,5 @@ class TrainMrc:
                                     
 if __name__ == "__main__":
     t = TrainMrc()
+    t.run()
     t.eval()
