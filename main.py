@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 '''
 Created on: 2022-04-23 15:01:47
-@LastEditTime: 2022-04-25 15:26:36
+@LastEditTime: 2022-04-30 14:11:45
 @Author: fduxuan
 
 @Desc:  
@@ -15,7 +15,8 @@ def main():
     d = DataSet()
     data = d.load_dataset()
     item = data['train'][0]
-    model_id = 'bert-base-uncased'
+    # model_id = 'bert-base-uncased'
+    model_id = 'xlnet-base-cased'
     tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
     for item in data['train']:
         if len(item['context'].split()) > 400 or item['is_impossible']:
@@ -46,7 +47,7 @@ def test_strip():
     d = DataSet()
     data = d.load_dataset()
     item = data['train'][0]
-    model_id = 'bert-base-uncased'
+    model_id = 'xlnet-base-cased'
     tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
     for item in data['train']:
         if len(item['context'].split()) > 400 and not item['is_impossible']:
@@ -72,9 +73,9 @@ def test_strip():
                         res.append(tokens['input_ids'][i][index])
                     elif end <= pos[0]:
                         break 
-            print(item['answer_text'])
-            print(tokenizer.convert_ids_to_tokens(res))
-            print()    
+                print(item['answer_text'])
+                print(tokenizer.convert_ids_to_tokens(res))
+                print()    
         
         
 if __name__ == "__main__":

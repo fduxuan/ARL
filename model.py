@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 '''
 Created on: 2022-04-25 15:54:12
-@LastEditTime: 2022-04-25 20:12:36
+@LastEditTime: 2022-05-05 10:30:35
 @Author: fduxuan
 
 @Desc:  模型文件
 
 '''
 
-from torch import nn, Tensor, tensor
+from torch import dropout, nn, Tensor, tensor
 import torch
 from util import logging
 from transformers import AutoModel
@@ -26,12 +26,15 @@ class MRC(nn.Module):
             model_id (str, optional): 模型. Defaults to 'bert-base-uncased'. // 也可以是文件夹
         """
         super().__init__()
-        # self.device = 'cuda'
-        self.device = 'cpu'
+        self.device = 'cuda'
+        # self.device = 'cpu'
         
         self.model_id = model_id
         self.hidden_size = 768
+        # self.hidden_size = 1024
+        
         self.model = None  # plm模型
+        self.dropout = nn.Dropout(0.2)
         self.linear = nn.Linear(self.hidden_size, 2)  # 隐藏层 --> start_pos &  end_pos
         self.load_model()
         self.to(self.device) # 转成cuda
@@ -70,9 +73,14 @@ class MRC(nn.Module):
         input_ids = self.tensor(batch_data['input_ids'])
         token_type_ids = self.tensor(batch_data['token_type_ids'])
         attention_mask = self.tensor(batch_data['attention_mask'])
-        last_hidden_state = self.model(input_ids=input_ids, attention_mask=attention_mask,
-                                           token_type_ids=token_type_ids)  
-        logits = self.linear(last_hidden_state[0])  # 是个元组，取第一个才是真正的隐藏输出  # (Batch, MaxLength, HiddenSize) --> (Batch, MaxLength, 2)
+        # last_hidden_state = self.model(input_ids=input_ids, attention_mask=attention_mask,
+                                        #    token_type_ids=token_type_ids)  
+        # roberta没有tokentypeid
+        last_hidden_state = self.model(input_ids=input_ids, attention_mask=attention_mask)
+        last_hidden_state = self.dropout(last_hidden_state[0])
+        logits = self.linear(last_hidden_state)  # 是个元组，取第一个才是真正的隐藏输出  # (Batch, MaxLength, HiddenSize) --> (Batch, MaxLength, 2)
+        
+        # logits = torch.sigmoid(logits)  # 激活
         start_logits, end_logits = logits.split(1, dim=-1)  # ((B, T, 1),(B, T, 1))
         start_logits = start_logits.squeeze(-1)  # (B, T)
         end_logits = end_logits.squeeze(-1)  # (B, T)

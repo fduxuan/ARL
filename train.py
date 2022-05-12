@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 '''
 Created on: 2022-04-25 15:12:29
-@LastEditTime: 2022-04-26 15:43:41
+@LastEditTime: 2022-05-07 14:15:52
 @Author: fduxuan
 
 @Desc:  训练
@@ -12,22 +12,35 @@ from transformers import AutoTokenizer
 from tqdm import trange, tqdm
 from model import MRC
 import torch
-
+import random
+import pymongo
+mongo_client = pymongo.MongoClient('mongodb://127.0.0.1:27017')
+db = mongo_client.get_database('arl')
 class TrainMrc:
     """ 训练MRC """
     
     def __init__(self):
         self.train_data = []
         self.dev_data = []
-        self.model_id = 'bert-base-uncased'
+        # self.model_id = 'bert-base-uncased'
+        # self.model_id = 'albert-base-v2'
+        # self.model_id = 'roberta-base'
+        # self.model_id = 'google/electra-base-discriminator'
+        # self.model_id = 'xlnet-base-cased'
+        self.model_id = 'facebook/bart-base'
+        # self.model_id = 'kssteven/ibert-roberta-base'
+        
+        
         # self.model_id = 'checkpoint'
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_id)
-        self.max_length = 384
-        self.stride=157
-        self.batch_size = 16
-        self.epoch_num = 1
-        self.learning_rate=2e-5
-        
+        self.max_length = 386
+        self.stride=128
+        self.batch_size = 4
+        self.epoch_num = 5
+        self.learning_rate=3e-6
+        self.encode_file=open('encode.txt', 'w')
+        self.current_epoch = 1
+                
     
     @staticmethod    
     def info(msg):
@@ -45,6 +58,7 @@ class TrainMrc:
         tokens = self.tokenizer(
             item['context'],
             item['question'],
+            # item['synonym_augment'],
             max_length=self.max_length,
             return_overflowing_tokens=True,
             stride=self.stride, # 重合
@@ -53,17 +67,29 @@ class TrainMrc:
         )
         # 先进行attention mask 手动扩充,如果长度不满max_length
         for i, offset_mapping in enumerate(tokens['offset_mapping']):
-            input_ids = tokens['input_ids'][i] + [0] * (self.max_length - len(offset_mapping))
-            token_type_ids = tokens['token_type_ids'][i] + [1] * (self.max_length - len(offset_mapping))
-            attention_mask = [1]*len(offset_mapping) + [0] * (self.max_length - len(offset_mapping))
-            answer = [0, 0]  # start, end (闭区间)
-            if not item['is_impossible']:
-                # 有答案
-                start = item['answer_start']
-                end = item['answer_start'] + len(item['answer_text'])
+            input_ids = tokens['input_ids'][i] + [0] * (self.max_length+1 - len(offset_mapping))
+            token_type_ids = tokens['token_type_ids'][i] + [1] * (self.max_length+1 - len(offset_mapping))
+            attention_mask = [1]*len(offset_mapping) + [0] * (self.max_length+1 - len(offset_mapping))
+
+            # 有答案
+            answers = []
+            answer_texts = [] # 多个答案
+                
+            answer_cls = [0, 0]
+            for index, _id in enumerate(input_ids):
+                if _id == self.tokenizer.cls_token_id:
+                    answer_cls = [index, index]
+                
+            for j in range(len(item['answer_starts'])):
+                answer = [0, 0]  # start, end (闭区间)
+                start = item['answer_starts'][j]
+                end = start + len(item['answer_texts'][j])
                 res = []
+                
                 for index, pos in enumerate(offset_mapping):
-                    if pos[0] < start:
+                    if input_ids[index] == self.tokenizer.cls_token_id:
+                        continue
+                    elif pos[0] < start:
                         continue
                     elif start <= pos[0] and end >= pos[1]:
                         res.append(index)
@@ -72,37 +98,53 @@ class TrainMrc:
                 if len(res):
                     answer[0] = res[0]
                     answer[1] = res[-1]  
+                else:
+                    answer = answer_cls
+                answers.append(answer)
+                answer_texts.append(item['answer_texts'][j])
+            if not answers:
+                answers.append(answer_cls)
+                answer_texts.append("")
             data_list.append(dict(
                 input_ids=input_ids,
                 token_type_ids=token_type_ids,
                 attention_mask=attention_mask,
-                answer=answer,
-                answer_text=item['answer_text']
+                answers=answers,
+                answer_texts=answer_texts,
+                answer=answers[0],
+                answer_text=answer_texts[0]
             ))
             # 查看输出答案是否正确
-            # print(item['answer_text'])
-            # print(self.tokenizer.convert_ids_to_tokens(input_ids[answer[0]: answer[1]+1]))
-            # print()
+            self.encode_file.write(f"answer_text_tokens: {self.tokenizer.convert_ids_to_tokens(input_ids[answers[0][0]: answers[0][1]+1])}\n")
+            self.encode_file.write(f"real_answer_text: {item['answer_text']}\n")
+            self.encode_file.write('\n')
         return data_list
 
-    def eval(self):
+    def eval(self, checkpoint=None):
         """ 进行验证
         """
+        if not checkpoint:
+            checkpoint = f'checkpoint-{self.model_id}'
         self.info('开始验证')
-        data = DataSet().load_dataset()
-        self.train_data = data['train']
-        self.dev_data = data['dev']
+        # data = DataSet().load_dataset()
+        # self.train_data = data['train']
+        # self.dev_data = data['dev']
+        self.dev_data = list(db['augment_dev'].find())
         bar = tqdm(self.dev_data)
-        mrc = MRC('checkpoint')
+        mrc = MRC(checkpoint)
         mrc.eval()
         f1 = 0.0
         f1_no_answer = 0.0
         f1_has_answer = 0.0
+        em = 0.0
+        em_no_answer = 0.0
+        em_has_answer = 0.0
         count = 0
         count_has_answer = 0
         count_no_answer = 0
         
         with torch.no_grad():
+            result = {}
             for item in bar:
                 # 每次只一个
                 dev_encode_data = self.encode(item)
@@ -110,23 +152,27 @@ class TrainMrc:
                     input_ids=[x['input_ids'] for x in dev_encode_data],
                     token_type_ids=[x['token_type_ids'] for x in dev_encode_data],
                     attention_mask=[x['attention_mask'] for x in dev_encode_data],
-                    answer_start=mrc.tensor([x['answer'][0] for x in dev_encode_data]),
-                    answer_end=mrc.tensor([x['answer'][1] for x in dev_encode_data]),
-                    answer_text=[x['answer_text'] for x in dev_encode_data],
+                    answers=[x['answers'] for x in dev_encode_data],
+                    answer_texts=[x['answer_texts'] for x in dev_encode_data],
                 )
                 batch_data['start_logits'], batch_data['end_logits'] = mrc(batch_data)
-                _f1 = f1_score(batch_data, item['is_impossible'])
+                _f1, _em = f1_score(batch_data, item['is_impossible'])
                 if item['is_impossible']:
                     f1_no_answer += _f1
+                    em_no_answer += _em
                     count_no_answer += 1
                 else:
                     f1_has_answer += _f1
+                    em_has_answer += _em
                     count_has_answer += 1
                 f1 += _f1
+                em += _em
                 count += 1
-                if count and count_has_answer and count_no_answer:
-                    bar.set_postfix({'f1_total': f1/count, 'f1_has_answer': f1_has_answer/count_has_answer, 'f1_no_answer': f1_no_answer/count_no_answer})
                 
+                if count and count_has_answer and count_no_answer:
+                    result = {'f1_total': f1/count, 'f1_has_answer': f1_has_answer/count_has_answer, 'f1_no_answer': f1_no_answer/count_no_answer, 'em_total': em/count, 'em_has_answer': em_has_answer/count_has_answer, 'em_no_answer': em_no_answer/count_no_answer}
+                    bar.set_postfix(result)
+            logging.info(f"{result}")
     
     def run(self):
         
@@ -145,7 +191,8 @@ class TrainMrc:
         # 3. 加载模型
         self.info('3. 加载模型和优化器')
         # mrc = MRC(self.model_id)
-        mrc = MRC('checkpoint')
+        # mrc = MRC('checkpoint')
+        mrc = MRC(self.model_id)
         optimizer = torch.optim.Adam(mrc.parameters(), lr=self.learning_rate)
         loss_func = torch.nn.CrossEntropyLoss()
         self.info(f'\t optimizer = Adam || loss_func = CrossEntropyLoss || learning_rate={self.learning_rate}')
@@ -156,8 +203,10 @@ class TrainMrc:
         with torch.enable_grad():
             mrc.train()
             for epoch in range(0, self.epoch_num):
-                
+                self.current_epoch = epoch+1
+                logging.info(f'当前第{self.current_epoch}轮')
                 loss_value = 0.0
+                random.shuffle(train_encode_data)
                 bar = trange(0, len(train_encode_data), self.batch_size)
                 for i in bar:
                     end = min(i + self.batch_size, len(train_encode_data))
@@ -193,9 +242,11 @@ class TrainMrc:
                         f.write(f"real_answer_text': {batch_data['answer_text'][j]}\n")
                         
                         f.write(f"predict_answer_text': {predict_answer}\n")
-            mrc.save_model()         
+                        f.write('\n')
+                mrc.save_model(f'checkpoint-{self.model_id}/{self.current_epoch}')  
+                self.eval(f'checkpoint-{self.model_id}/{self.current_epoch}')       
                                     
 if __name__ == "__main__":
     t = TrainMrc()
     t.run()
-    t.eval()
+    # t.eval(f'checkpoint-{t.model_id}/2')
